@@ -1,65 +1,107 @@
-# Example Voting App
+# Lab Infra cloud conteneur 
 
-A simple distributed application running across multiple Docker containers.
+## Deployment de Cluster Kubernetes sur GCP à l'aide de Terraform
 
-## Getting started
+### Crétion de Compte GCP
+A l'aide d'un compte google, souscrivez à l'offre de GCP vous octroyant 300$ de credit.
 
-Download [Docker Desktop](https://www.docker.com/products/docker-desktop) for Mac or Windows. [Docker Compose](https://docs.docker.com/compose) will be automatically installed. On Linux, make sure you have the latest version of [Compose](https://docs.docker.com/compose/install/).
+### Déploiement de GKE à l'aide de terraform
+A l'aide de Terraform, vous allez déployer un cluster Kubernetes avec les caractéristiques suivantes:
+* création d'un VPC dédié dans le Cloud
+  * Le nom du VPC sera comme tel : `<Nom_du_projet_Google>-<Votre_prenom>`
+  * Création d'un sous réseaux dédié dans ce VPC dont la plage d'adressage du sous réseaux est : `"10.10.0.0/24"`
+  * Le nom du sous réseaux sera : `<Nom_du_projet_Google>-<Votre_prenom>-subnet`
+* La création du Pool d'instances Worker Kubernetes:
+  * Nombre de noeuds : `2`
+  * Supprimer le Pool par default
+  * Ce pool sera dans le sous réseaux créé dans le VPC
+  * Type d'instance Google : `"e2-standard-2"`
 
-This solution uses Python, Node.js, .NET, with Redis for messaging and Postgres for storage.
+### Accès au cluster Kubernetes créé
+Sur votre machine locale ou à partir d'une machine d'administration, installez l'utilitaire `kubectl` et configurer les identifiants pour se rassurer qu'on a bien accès aux ressources Kubernetes
 
-Run in this directory to build and run the app:
+## Déploiement d'une application de microservices
 
-```shell
-docker compose up
+le répertoire `voting-app` contient le code source d'une application composé de microservices
+
+Nous nous mettons dans le contexte où nous avons développé une application de vote `voting-app`
+Pour rappel, [example-voting-app](https://github.com/dockersamples/example-voting-app) est une application maintenu par la communauté Docker qui est très souvent utilisée pour faire des démo de microservices.
+Il est concu en microservices avec l'architecture suivante :
+
+![architecture](https://user-images.githubusercontent.com/59444079/202094328-30a5cb07-f33b-40bf-828a-7dc5de405bb7.png)
+
+La stack est composée de 5 services:
+* un service front `voting-app` développé en Python : Les utilisateurs peuvent y accéder pour voter en cliquant
+* un service front `result-app` développé en Node.js : Les utilisateurs peuvent y accéder pour voir les résultats du vote
+* un service backend `worker` qui traites les requètes et les persistent dans une base de donnée PostgreSQL
+* un service de Base de données `db` PostgreSQL qui persiste la donnée
+* un service de cache `redis` utilisé par le microservice `voting-app`
+
+L'objectif de cette partie du lab est de :
+1. Dockeriser cette stack
+2. Créer des fichier de déploiement, services nécessaires pour avoir ce microservice déployé dans le Cluster K8s précédement créé
+3. Vérifiez qu'il est bien accessible depuis une IP publique et que toutes les fonctionnalités de l'application sont opérationnelles
+## GitOps
+
+L'objectif de cette partie du lab est d'automatiser le Déploiement de la stack de microservice suivant le shéma workflow suivant :
+La mise à jour des fichiers de déploiement du microservice dans le dépôt GitHub ==> déclenche le déploiement de cette nouvelle mise à jour dans le cluster Kubernetes GKE.
+Pour ce faire, nous utiliserons ArgoCD comme outil de Continuous Delivery (CD)
+### Installer ArgoCD
+
+De manière natif K8s de permet pas de faire du CD ==> Solution on va étendre son API avec l'installation de ArgoCD pour ajouter cette fonctionalité
+
+```bash
+kubectl api-resources | grep -i argo
 ```
 
-The `vote` app will be running at [http://localhost:5000](http://localhost:5000), and the `results` will be at [http://localhost:5001](http://localhost:5001).
-
-Alternately, if you want to run it on a [Docker Swarm](https://docs.docker.com/engine/swarm/), first make sure you have a swarm. If you don't, run:
-
-```shell
-docker swarm init
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 ```
 
-Once you have your swarm, in this directory run:
+Patcher le service
 
-```shell
-docker stack deploy --compose-file docker-stack.yml vote
+```bash
+kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
 ```
 
-## Run the app in Kubernetes
+Récupérer le mot de pass Admin
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+```
+Via l'IP du loadbalancer, vérifiez que vous avez bien accès la console d'administration et de gestion de ArgoCD
 
-The folder k8s-specifications contains the YAML specifications of the Voting App's services.
+On utilisera `ArgoCD CLI` pour certaines commandes d'administration; piur ce faire vous devez l'installer sur votre machine d'administration.
 
-Run the following command to create the deployments and services. Note it will create these resources in your current namespace (`default` if you haven't changed it.)
-
-```shell
-kubectl create -f k8s-specifications/
+Exemple d'installation sur MacOS
+```bash
+brew install argocd
 ```
 
-The `vote` web app is then available on port 31000 on each host of the cluster, the `result` web app is available on port 31001.
+Se connecter à ArgoCD
 
-To remove them, run:
+```bash
+kubectl get service argocd-server -n argocd --output=jsonpath='{.status.loadBalancer.ingress[0].ip}'
+# argocd login <IP LoadBalancer> --username admin --password $(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo) --insecure
 
-```shell
-kubectl delete -f k8s-specifications/
+argocd login $(kubectl get service argocd-server -n argocd --output=jsonpath='{.status.loadBalancer.ingress[0].ip}') --username admin --password $(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo) --insecure
+
 ```
 
-## Architecture
+Ajout du repos Git
 
-![Architecture diagram](architecture.png)
+Créer un Repo Github et ajoutez le dans ArgoCD comme Repo à partir duquel ils déploiera l'application `voting-app`
 
-* A front-end web app in [Python](/vote) which lets you vote between two options
-* A [Redis](https://hub.docker.com/_/redis/) which collects new votes
-* A [.NET](/worker/) worker which consumes votes and stores them in…
-* A [Postgres](https://hub.docker.com/_/postgres/) database backed by a Docker volume
-* A [Node.js](/result) web app which shows the results of the voting in real time
+```bash
+argocd repo add git@github.com:mpakoupete/gitops-test-argocd.git --ssh-private-key-path ~/.ssh/id_rsa
+```
 
-## Notes
+Aller dans l'application (interface Web de ArgoCD) poour les config
+- Application
 
-The voting application only accepts one vote per client browser. It does not register additional votes if a vote has already been submitted from a client.
+Configurer un déploiement continu de l'application dans le namespace dev-voting-app
 
-This isn't an example of a properly architected perfectly designed distributed app... it's just a simple
-example of the various types of pieces and languages you might see (queues, persistent data, etc), and how to
-deal with them in Docker at a basic level.
+```bash
+kubectl create ns dev-voting-app
+```
+
